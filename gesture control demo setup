@@ -1,0 +1,59 @@
+terminal 0 (cleans everything)
+
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 daemon stop
+pkill -f rviz2 || true
+pkill -f joint_state_publisher || true
+pkill -f joint_state_publisher_gui || true
+pkill -f robot_state_publisher || true
+pkill -f move_group || true
+ros2 daemon start
+
+
+terminal 1 (Robot State Publisher)
+source /opt/ros/humble/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+ROBOT_DESCRIPTION=$(xacro $(ros2 pkg prefix ur_description)/share/ur_description/urdf/ur.urdf.xacro \
+  safety_limits:=true safety_pos_margin:=0.15 safety_k_position:=20 \
+  name:=ur ur_type:=ur5e tf_prefix:="")
+
+ros2 run robot_state_publisher robot_state_publisher --ros-args \
+  -r /joint_states:=/joint_states_gesture \
+  -p robot_description:="$ROBOT_DESCRIPTION"
+
+
+
+terminal 2 (RViz viewer)
+source /opt/ros/humble/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+rviz2 -d $(ros2 pkg prefix ur_description)/share/ur_description/rviz/view_robot.rviz
+
+
+terminal 3 (moveit)
+source /opt/ros/humble/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur5e
+
+
+
+terminal 4 (gesture publisher)
+source /opt/ros/humble/setup.bash
+source ~/gesture_ws/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+source ~/mp_venv/bin/activate
+python3 -m gesture_control.gesture_pub
+
+
+
+terminal 5 (IK, gripper markers, joint pub)
+source /opt/ros/humble/setup.bash
+source ~/gesture_ws/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+ros2 run gesture_control moveit_cartesian_demo --ros-args \
+  -p base_frame:=world -p ik_link:=tool0 -p joint_topic:=/joint_states_gesture
+

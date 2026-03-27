@@ -1,0 +1,27 @@
+Gesture-controlled UR5e demo (ROS2 humble)
+
+Nodes:
+- gesture_pub.py
+  publishes:
+  	/gesture (String): open, fist
+  	/pinch_norm (Float32): 0..1 pinch amount
+  	
+  	
+- moveit_cartesian_demo.py
+  subscribes:
+  	/gesture
+  	/pinch_norm
+  uses:
+  	moveit /compute_ik
+  publishes:
+  	/joint_states_gesture
+  	/rg2_markers
+  	
+Architecture:
+ gesture → intent → IK → joint_states → robot_state_publisher → TF → RViz
+ 
+Important:
+- Do NOT run joint_state_publisher_gui
+- robot_state_publisher must be remapped to /joint_states_gesture
+- IK link: tool0
+

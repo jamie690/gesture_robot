@@ -1,0 +1,7 @@
+digraph G {
+"base" -> "tool0_controller"[label=" Broadcaster: default_authority\nAverage rate: 500.231\nBuffer length: 3.954\nMost recent transform: 1774547695.912482\nOldest transform: 1774547691.95831\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1774547695.9154081"[ shape=plaintext ] ;
+}->"base";
+}
