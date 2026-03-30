@@ -21,6 +21,9 @@ from std_srvs.srv import Trigger
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from moveit_msgs.msg import PlanningScene, CollisionObject
+from shape_msgs.msg import SolidPrimitive
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -84,6 +87,18 @@ class MoveItCartesianDemo(Node):
         self.y_max = float(self.declare_parameter("y_max", 0.40).value)
         self.z_min = float(self.declare_parameter("z_min", 0.10).value)
         self.z_max = float(self.declare_parameter("z_max", 0.75).value)
+
+        #------------------------------------------------------------------
+        # Collision object (table) params
+        #------------------------------------------------------------------
+        self.table_enabled = bool(self.declare_parameter("table_enabled", True).value)
+        self.table_size_x = float(self.declare_parameter("table_size_x", 0.8).value)
+        self.table_size_y = float(self.declare_parameter("table_size_y", 0.6).value)
+        self.table_size_z = float(self.declare_parameter("table_size_z", 0.02).value)
+
+        self.table_pos_x = float(self.declare_parameter("table_pos_x", 0.0).value)
+        self.table_pos_y = float(self.declare_parameter("table_pos_y", -0.4).value)
+        self.table_top_z = float(self.declare_parameter("table_top_z", 0.0).value)
 
         # ------------------------------------------------------------------
         # UR handshake
@@ -159,6 +174,8 @@ class MoveItCartesianDemo(Node):
         self.pub_js = self.create_publisher(JointState, self.joint_topic, 10)
         self.pub_markers = self.create_publisher(MarkerArray, "/rg2_markers", 10)
 
+        self.pub_planning_scene = self.create_publisher(PlanningScene, "/planning_scene", 10)
+
         if self.use_ur_io_handshake:
             self.sub_io = self.create_subscription(IOStates, self.io_states_topic, self.on_io_states, 10)
             self.sub_prog = self.create_subscription(Bool, self.robot_program_topic, self.on_robot_program, 10)
@@ -203,6 +220,9 @@ class MoveItCartesianDemo(Node):
         # Initial pose sync
         self.init_target_from_tf()
         self.request_ik("startup")
+
+        if self.table_enabled:
+            self.publish_table_collision()
 
         self.get_logger().info(
             f"STARTUP CONFIG: manual_axis={self.manual_axis} left_sign={self.left_sign} "
@@ -747,6 +767,46 @@ class MoveItCartesianDemo(Node):
             self.get_logger().info(f"Real motion finished with error_code={result.error_code}")
         except Exception as e:
             self.get_logger().warn(f"Error waiting for real motion result: {e}")
+
+    #------------------------------------------------------------------
+    # Collision objects (tbl)
+    #------------------------------------------------------------------
+    def publish_table_collision(self) -> None:
+        scene = PlanningScene()
+        scene.is_diff = True
+
+        table = CollisionObject()
+        table.header.frame_id = self.base_frame
+        table.id = "table"
+        table.operation = CollisionObject.ADD
+
+        primitive = SolidPrimitive()
+        primitive.type = SolidPrimitive.BOX
+        primitive.dimensions = [
+            self.table_size_x,
+            self.table_size_y,
+            self.table_size_z,
+        ]
+
+        pose = PoseStamped().pose
+        pose.position.x = self.table_pos_x
+        pose.position.y = self.table_pos_y
+        pose.position.z = self.table_top_z - (self.table_size_z / 2.0)
+        pose.orientation.w = 1.0
+
+        table.primitives.append(primitive)
+        table.primitive_poses.append(pose)
+
+        scene.world.collision_objects.append(table)
+        self.pub_planning_scene.publish(scene)
+
+        self.get_logger().info(
+            f"Published table collision object: "
+            f"size=({self.table_size_x:.3f}, {self.table_size_y:.3f}, {self.table_size_z:.3f}) "
+            f"pos=({self.table_pos_x:.3f}, {self.table_pos_y:.3f}, {pose.position.z:.3f}) "
+            f"in frame {self.base_frame}"
+        )   
+
 
     # ------------------------------------------------------------------
     # RViz markers

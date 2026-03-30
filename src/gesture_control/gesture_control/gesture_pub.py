@@ -8,6 +8,9 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Float32
 
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -45,6 +48,8 @@ class GesturePub(Node):
         self.gesture_pub = self.create_publisher(String, "/gesture", 10)
         self.pinch_pub = self.create_publisher(Float32, "/pinch", 10)
         self.pinch_norm_pub = self.create_publisher(Float32, "/pinch_norm", 10)
+        self.image_pub = self.create_publisher(Image, "/gesture_camera/image_raw", 10)
+        self.bridge = CvBridge()
 
         # ------------------------------------------------------------
         # Parameters
@@ -80,6 +85,10 @@ class GesturePub(Node):
         self.declare_parameter("window_width", 1280)
         self.declare_parameter("window_height", 980)
 
+        # Image publishing
+        self.declare_parameter("publish_image", True)
+
+
         # ------------------------------------------------------------
         # Read parameters
         # ------------------------------------------------------------
@@ -106,6 +115,8 @@ class GesturePub(Node):
 
         self.window_width = int(self.get_parameter("window_width").value)
         self.window_height = int(self.get_parameter("window_height").value)
+
+        self.publish_image = bool(self.get_parameter("publish_image").value)
 
         # ------------------------------------------------------------
         # Camera
@@ -521,6 +532,15 @@ class GesturePub(Node):
             2,
             cv2.LINE_AA,
         )
+        
+        # Publish image
+        if self.publish_image:
+            try:
+                img_msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+                img_msg.header.stamp = self.get_clock().now().to_msg()
+                self.image_pub.publish(img_msg)
+            except Exception as e:
+                self.get_logger().error(f"Failed to publish webcam image: {e}")
 
         if self.show_window:
             cdisplay_frame = cv2.resize(
