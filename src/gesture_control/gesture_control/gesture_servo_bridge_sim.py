@@ -59,7 +59,7 @@ class GestureServoBridge(Node):
         # ------------------------------------------------------------
         # Pick-cycle / handshake params
         # ------------------------------------------------------------
-        self.declare_parameter("use_ur_io_handshake", True)
+        self.declare_parameter("use_ur_io_handshake", False)
         self.declare_parameter("set_io_service", "/io_and_status_controller/set_io")
         self.declare_parameter("io_states_topic", "/io_and_status_controller/io_states")
         self.declare_parameter("robot_program_topic", "/io_and_status_controller/robot_program_running")
@@ -90,6 +90,21 @@ class GestureServoBridge(Node):
         self.declare_parameter("max_vx", 0.4)
         self.declare_parameter("max_vy", 0.4)
         self.declare_parameter("xy_deadzone", 0.05)
+
+        self.declare_parameter("sim_mode", True)
+
+        #--------------------------------------------
+        # Sim pick cycle params
+        #--------------------------------------------
+        self.declare_parameter("sim_pick_down_speed", 0.4)
+        self.declare_parameter("sim_pick_up_speed", 0.4)
+        self.declare_parameter("sim_pick_drop_x", -0.1)
+        self.declare_parameter("sim_pick_drop_y", -0.30)
+        self.declare_parameter("sim_pick_z_pick", 0.1)
+        self.declare_parameter("sim_pick_z_lift", 0.32)
+        self.declare_parameter("sim_drop_xy_tol", 0.03)
+        self.declare_parameter("sim_drop_z_tol", 0.02)
+        self.declare_parameter("place_release_frames", 4)
 
         # ------------------------------------------------------------
         # Read params
@@ -142,6 +157,19 @@ class GestureServoBridge(Node):
         self.max_vy = float(self.get_parameter("max_vy").value)
         self.xy_deadzone = float(self.get_parameter("xy_deadzone").value)
 
+        self.sim_mode = bool(self.get_parameter("sim_mode").value)
+
+        self.sim_pick_down_speed = float(self.get_parameter("sim_pick_down_speed").value)
+        self.sim_pick_up_speed = float(self.get_parameter("sim_pick_up_speed").value)
+        self.sim_pick_drop_x = float(self.get_parameter("sim_pick_drop_x").value)
+        self.sim_pick_drop_y = float(self.get_parameter("sim_pick_drop_y").value)
+        self.sim_pick_z_pick = float(self.get_parameter("sim_pick_z_pick").value)
+        self.sim_pick_z_lift = float(self.get_parameter("sim_pick_z_lift").value)
+        self.sim_drop_xy_tol = float(self.get_parameter("sim_drop_xy_tol").value)
+        self.sim_drop_z_tol = float(self.get_parameter("sim_drop_z_tol").value)
+        self.place_release_frames = int(self.get_parameter("place_release_frames").value)
+        
+
         # ------------------------------------------------------------
         # Internal state
         # ------------------------------------------------------------
@@ -169,6 +197,8 @@ class GestureServoBridge(Node):
         self.hand_dy = 0.0
 
         self.last_hand_xy_time = self.get_clock().now()
+
+        self.place_release_count = 0
 
         # Subscribe to hand position updates
         self.sub_hand_xy = self.create_subscription(Vector3, "/hand_xy", self.on_hand_xy, 10)
@@ -223,12 +253,12 @@ class GestureServoBridge(Node):
             self.get_logger().info(f"Gesture -> {g}")
             self.last_logged_gesture = g
 
-        if self.state != "COARSE_PICK_GUIDE":
-            return
+        # Always track latest gesture in both manual guidance states
+        if self.state in ["COARSE_PICK_GUIDE", "COARSE_PLACE_GUIDE"]:
+            self.current_gesture = g
 
-        self.current_gesture = g
-
-        if g == "fist":
+        # Empty-hand guidance: fist starts pick
+        if self.state == "COARSE_PICK_GUIDE" and g == "fist":
             self.start_cycle_sequence()
 
     def on_hand_xy(self, msg: Vector3) -> None:
@@ -264,31 +294,134 @@ class GestureServoBridge(Node):
                     dy = self.hand_dy
 
                 mag = math.hypot(dx, dy)
-                
+
                 if mag < self.xy_deadzone:
                     vx = 0.0
                     vy = 0.0
                 else:
                     vx = self.max_vx * (-dy)
-                    vy = -self.max_vy * ( dx)
-        
-        if self.state == "COARSE_PICK_GUIDE" and (vx != 0.0 or vy != 0.0):
-            if self.update_current_tcp_pose():
-                horizon = 0.15  # seconds ahead to test
-                cand_x = self.current_tcp_x + vx * horizon
-                cand_y = self.current_tcp_y + vy * horizon
+                    vy = -self.max_vy * (dx)
 
-                if not self.candidate_pose_allowed(cand_x, cand_y):
-                    self.get_logger().warn(
-                        f"Workspace block: cur=({self.current_tcp_x:.3f}, {self.current_tcp_y:.3f}) "
-                        f"cand=({cand_x:.3f}, {cand_y:.3f}) "
-                        f"limits x[{self.x_min:.3f}, {self.x_max:.3f}] "
-                        f"y[{self.y_min:.3f}, {self.y_max:.3f}] "
-                        f"r={self.inner_radius:.3f}"
-                    )
+        elif self.state == "SIM_DESCEND_PICK":
+            vz, reached = self.step_towards_z(self.sim_pick_z_pick, self.sim_pick_down_speed)
+            vx = 0.0
+            vy = 0.0
+            self.status_text = "Sim pick: descending to object"
+
+            if reached:
+                self.object_attached = True
+                self.gripper_closed = True
+                self.state = "SIM_LIFT_AFTER_PICK"
+                self.status_text = "Sim pick: lifting object"
+                self.get_logger().info("Sim object picked.")
+
+        elif self.state == "SIM_LIFT_AFTER_PICK":
+            vz, reached = self.step_towards_z(self.sim_pick_z_lift, self.sim_pick_up_speed)
+            vx = 0.0
+            vy = 0.0
+            self.status_text = "Sim pick: lifting after pick"
+
+            if reached:
+                self.state = "COARSE_PLACE_GUIDE"
+                self.current_gesture = "fist"
+                self.place_release_count = 0
+                self.status_text = "Carry mode: hold fist to move, release to place"
+                self.get_logger().info("Entered carry mode.")
+
+        elif self.state == "COARSE_PLACE_GUIDE":
+            age = (self.get_clock().now() - self.last_hand_xy_time).nanoseconds / 1e9
+            if age > self.hand_xy_timeout_s:
+                dx = 0.0
+                dy = 0.0
+                self.status_text = "Carry mode: hand signal timeout"
+            else:
+                dx = self.hand_dx
+                dy = self.hand_dy
+
+            # While fist is held, allow XY motion
+            if self.current_gesture == "fist":
+                self.place_release_count = 0
+
+                mag = math.hypot(dx, dy)
+                if mag < self.xy_deadzone:
                     vx = 0.0
                     vy = 0.0
-                    self.status_text = "Workspace limit reached"
+                else:
+                    vx = self.max_vx * (-dy)
+                    vy = -self.max_vy * (dx)
+
+                vz = 0.0
+                self.status_text = "Carry mode: hold fist to move, release to place"
+
+            else:
+                vx = 0.0
+                vy = 0.0
+                vz = 0.0
+                self.place_release_count += 1
+                self.status_text = f"Carry mode: release detected ({self.place_release_count}/{self.place_release_frames})"
+
+                if self.place_release_count >= self.place_release_frames:
+                    self.state = "SIM_DESCEND_PLACE"
+                    self.status_text = "Sim place: descending"
+                    self.get_logger().info("Release confirmed. Starting place macro.")
+
+        elif self.state == "SIM_DESCEND_PLACE":
+            vz, reached = self.step_towards_z(self.sim_pick_z_pick, self.sim_pick_down_speed)
+            vx = 0.0
+            vy = 0.0
+            self.status_text = "Sim place: lowering to place"
+
+            if reached:
+                self.object_attached = False
+                self.gripper_closed = False
+                self.state = "SIM_ASCEND_AFTER_PLACE"
+                self.status_text = "Sim place: lifting after release"
+                self.get_logger().info("Sim object placed.")
+
+        elif self.state == "SIM_ASCEND_AFTER_PLACE":
+            vz, reached = self.step_towards_z(self.sim_pick_z_lift, self.sim_pick_up_speed)
+            vx = 0.0
+            vy = 0.0
+            self.status_text = "Sim place: ascending"
+
+            if reached:
+                self.state = "COARSE_PICK_GUIDE"
+                self.current_gesture = "none"
+                self.place_release_count = 0
+                self.status_text = "Servo guidance active"
+                self.get_logger().info("Sim pick/place cycle complete.")
+        
+        if self.state in ["COARSE_PICK_GUIDE", "COARSE_PLACE_GUIDE"] and (vx != 0.0 or vy != 0.0):
+            if self.update_current_tcp_pose():
+                horizon = 0.15
+                cur_x = self.current_tcp_x
+                cur_y = self.current_tcp_y
+                cand_x = cur_x + vx * horizon
+                cand_y = cur_y + vy * horizon
+
+                cur_ok = self.candidate_pose_allowed(cur_x, cur_y)
+                cand_ok = self.candidate_pose_allowed(cand_x, cand_y)
+
+                if cur_ok:
+                    if not cand_ok:
+                        self.get_logger().warn(
+                            f"Workspace block: cur=({cur_x:.3f}, {cur_y:.3f}) "
+                            f"cand=({cand_x:.3f}, {cand_y:.3f})"
+                        )
+                        vx = 0.0
+                        vy = 0.0
+                        self.status_text = "Workspace limit reached"
+                else:
+                    cur_v = self.workspace_violation(cur_x, cur_y)
+                    cand_v = self.workspace_violation(cand_x, cand_y)
+
+                    # allow motion only if it improves the situation
+                    if cand_v > (cur_v - 1e-4):
+                        vx = 0.0
+                        vy = 0.0
+                        self.status_text = "Move back toward workspace"
+
+        
 
         msg.twist.linear.x = vx
         msg.twist.linear.y = vy
@@ -324,12 +457,22 @@ class GestureServoBridge(Node):
         if self.state != "COARSE_PICK_GUIDE":
             return
 
+        if self.sim_mode or not self.use_ur_io_handshake:
+            self.state = "SIM_DESCEND_PICK"
+            self.status_text = "Sim pick: descending to object"
+            self.current_gesture = "fist"
+            self.gripper_closed = False
+            self.object_attached = False
+            self.place_release_count = 0
+            self.get_logger().info("Sim pick cycle started.")
+            return
+
+        # real robot path unchanged
         self.state = "WAITING_FOR_CYCLE"
         self.status_text = "Cycle requested"
         self.object_attached = True
         self.gripper_closed = True
         self.current_gesture = "none"
-
         self.get_logger().info("Cycle sequence started.")
 
         if self.use_ur_io_handshake:
@@ -342,6 +485,32 @@ class GestureServoBridge(Node):
 
             self.hand_back_control()
 
+    def step_towards_xy(self, target_x: float, target_y: float, gain: float = 1.5, max_speed: float = 0.10):
+        if not self.update_current_tcp_pose():
+            return 0.0, 0.0, False
+
+        ex = target_x - self.current_tcp_x
+        ey = target_y - self.current_tcp_y
+
+        vx = clamp(gain * ex, -max_speed, max_speed)
+        vy = clamp(gain * ey, -max_speed, max_speed)
+
+        reached = math.hypot(ex, ey) < self.sim_drop_xy_tol
+        return vx, vy, reached
+    
+    def step_towards_z(self, target_z: float, speed: float):
+        if not self.update_current_tcp_pose():
+            return 0.0, False
+
+        ez = target_z - self.current_tcp_z
+
+        if abs(ez) < self.sim_drop_z_tol:
+            return 0.0, True
+
+        vz = clamp(ez, -speed, speed)
+        return vz, False
+
+        
     def complete_cycle_sequence(self) -> None:
         self.set_pick_request(False)
         self.state = "COARSE_PICK_GUIDE"
@@ -442,6 +611,28 @@ class GestureServoBridge(Node):
                 return False
 
         return True
+    
+    def workspace_violation(self, x: float, y: float) -> float:
+        violation = 0.0
+
+        if x < self.x_min:
+            violation += self.x_min - x
+        elif x > self.x_max:
+            violation += x - self.x_max
+
+        if y < self.y_min:
+            violation += self.y_min - y
+        elif y > self.y_max:
+            violation += y - self.y_max
+
+        if self.inner_radius_enabled:
+            dx = x - self.inner_radius_center_x
+            dy = y - self.inner_radius_center_y
+            r = math.hypot(dx, dy)
+            if r < self.inner_radius:
+                violation += self.inner_radius - r
+
+        return violation
     
 
 

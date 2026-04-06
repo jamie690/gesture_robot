@@ -65,8 +65,9 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 ros2 run gesture_control gesture_servo_bridge --ros-args \
   -p command_frame:=base_link \
-  -p vx:=0.5 \
-  -p vy:=0.5 \
+  -p max_vx:=1.0 \
+  -p max_vy:=1.0 \
+  -p xy_deadzone:=0.08 \
   -p vz:=0.00 \
   -p publish_rate:=50.0 \
   -p left_sign:=-1.0 \
@@ -76,12 +77,21 @@ ros2 run gesture_control gesture_servo_bridge --ros-args \
   -p cycle_done_pin:=1 \
   -p hand_back_service:=/io_and_status_controller/hand_back_control \
   -p table_enabled:=true \
-  -p table_size_x:=0.8 \
-  -p table_size_y:=0.6 \
-  -p table_size_z:=0.02 \
-  -p table_pos_x:=0.0 \
-  -p table_pos_y:=-0.4 \
-  -p table_top_z:=0.0
+  -p table_size_x:=0.6 \
+  -p table_size_y:=0.8 \
+  -p table_size_z:=0.01 \
+  -p table_pos_x:=-0.4 \
+  -p table_pos_y:=0.0 \
+  -p table_top_z:=0.0 \
+  -p workspace_enabled:=true \
+  -p x_min:=-0.85 \
+  -p x_max:=0.1 \
+  -p y_min:=-0.6 \
+  -p y_max:=0.6 \
+  -p inner_radius_enabled:=true \
+  -p inner_radius:=0.25 \
+  -p inner_radius_center_x:=0.0 \
+  -p inner_radius_center_y:=0.0
 " C-m
 
 # ------------------------------------------------------------------
@@ -95,12 +105,13 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 source ~/mp_venv/bin/activate
 
 python3 -m gesture_control.gesture_pub --ros-args \
-  -p zone_x_min:=0.0 \
-  -p zone_x_max:=1.0 \
-  -p zone_y_min:=0.0 \
-  -p zone_y_max:=1.0 \
+  -p zone_x_min:=0.05 \
+  -p zone_x_max:=0.95 \
+  -p zone_y_min:=0.05 \
+  -p zone_y_max:=0.95 \
   -p neutral_deadzone_x:=0.09 \
   -p neutral_deadzone_y:=0.10 \
+  -p xy_publish_deadzone:=0.03 \
   -p gesture_hold_frames:=5 \
   -p activation_hold_frames:=15 \
   -p command_cooldown_s:=0.25 \
@@ -118,7 +129,7 @@ tmux send-keys -t "$P4" "
 sleep 14
 source /opt/ros/humble/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-
+ros2 service call /servo_node/start_servo std_srvs/srv/Trigger "{}"
 rviz2 -d ~/gesture_ws/rviz/gesture_demo.rviz
 " C-m
 

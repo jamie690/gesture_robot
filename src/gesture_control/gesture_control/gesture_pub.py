@@ -6,10 +6,12 @@ import mediapipe as mp
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Float32
+from std_msgs.msg import String, Float32, Bool
 
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+
+from geometry_msgs.msg import Vector3
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -50,6 +52,9 @@ class GesturePub(Node):
         self.pinch_norm_pub = self.create_publisher(Float32, "/pinch_norm", 10)
         self.image_pub = self.create_publisher(Image, "/gesture_camera/image_raw", 10)
         self.bridge = CvBridge()
+        self.hand_xy_pub = self.create_publisher(Vector3, "/hand_xy", 10)
+        self.fist_pressed_pub = self.create_publisher(Bool, "/fist_pressed", 10)
+        self.fist_released_pub = self.create_publisher(Bool, "/fist_released", 10)
 
         # ------------------------------------------------------------
         # Parameters
@@ -88,6 +93,13 @@ class GesturePub(Node):
         # Image publishing
         self.declare_parameter("publish_image", True)
 
+        # Diagonal motion
+        self.declare_parameter("xy_publish_deadzone", 0.08)
+
+        # Confidence gates
+        self.declare_parameter("gesture_conf_threshold", 0.55)
+        self.declare_parameter("show_confidence", True)
+
 
         # ------------------------------------------------------------
         # Read parameters
@@ -117,6 +129,11 @@ class GesturePub(Node):
         self.window_height = int(self.get_parameter("window_height").value)
 
         self.publish_image = bool(self.get_parameter("publish_image").value)
+
+        self.xy_publish_deadzone = float(self.get_parameter("xy_publish_deadzone").value)
+
+        self.gesture_conf_threshold = float(self.get_parameter("gesture_conf_threshold").value)
+        self.show_confidence = bool(self.get_parameter("show_confidence").value)
 
         # ------------------------------------------------------------
         # Camera
@@ -166,6 +183,10 @@ class GesturePub(Node):
         self.toggle_latched = False
         self.mode_switch_cooldown_s = 0.75
         self.last_mode_switch_time = 0.0
+
+        self.current_confidence = 0.0
+
+        self.prev_fist_active = False
 
     # ------------------------------------------------------------
     # Landmark helpers
@@ -313,6 +334,61 @@ class GesturePub(Node):
         self.gesture_pub.publish(String(data=gesture))
         self._last_published_gesture = gesture
 
+    def publish_fist_events(self, stable_gesture: str):
+        fist_active = (stable_gesture == "fist")
+
+        if fist_active and not self.prev_fist_active:
+            self.fist_pressed_pub.publish(Bool(data=True))
+            self.get_logger().info("Fist PRESSED")
+
+        if (not fist_active) and self.prev_fist_active:
+            self.fist_released_pub.publish(Bool(data=True))
+            self.get_logger().info("Fist RELEASED")
+
+        self.prev_fist_active = fist_active
+
+    def compute_gesture_confidence(self, lm, palm_x: float, palm_y: float, candidate: str) -> float:
+        # 1) Palm-facing contribution
+        facing_score = self.palm_facing_score(lm)
+        facing_conf = clamp(facing_score / max(self.min_palm_facing_score, 1e-6), 0.0, 1.0)
+
+        # 2) Zone-centred contribution (higher near centre of allowed interaction box)
+        zone_cx = 0.5 * (self.zone_x_min + self.zone_x_max)
+        zone_cy = 0.5 * (self.zone_y_min + self.zone_y_max)
+        zone_half_w = 0.5 * (self.zone_x_max - self.zone_x_min)
+        zone_half_h = 0.5 * (self.zone_y_max - self.zone_y_min)
+
+        nx = abs(palm_x - zone_cx) / max(zone_half_w, 1e-6)
+        ny = abs(palm_y - zone_cy) / max(zone_half_h, 1e-6)
+        zone_conf = clamp(1.0 - max(nx, ny), 0.0, 1.0)
+
+        # 3) Directional strength contribution
+        dx = palm_x - 0.5
+        dy = palm_y - 0.5
+        mag = math.hypot(dx, dy)
+
+        deadzone_mag = math.hypot(self.neutral_deadzone_x, self.neutral_deadzone_y)
+        direction_conf = clamp((mag - 0.5 * deadzone_mag) / 0.35, 0.0, 1.0)
+
+        # 4) Stability contribution
+        stability_conf = clamp(self._same_count / max(self.gesture_hold_frames, 1), 0.0, 1.0)
+
+        # Special cases
+        if candidate == "none":
+            return 0.0
+        if candidate == "fist":
+            # fists depend less on direction distance
+            conf = 0.45 * facing_conf + 0.20 * zone_conf + 0.35 * stability_conf
+        else:
+            conf = (
+                0.30 * facing_conf +
+                0.20 * zone_conf +
+                0.30 * direction_conf +
+                0.20 * stability_conf
+            )
+
+        return clamp(conf, 0.0, 1.0)
+
     # ------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------
@@ -339,6 +415,8 @@ class GesturePub(Node):
         in_zone = False
         facing_score = 0.0
         activation_candidate = False
+
+
 
         if results.multi_hand_landmarks:
             hand_landmarks = results.multi_hand_landmarks[0]
@@ -367,6 +445,30 @@ class GesturePub(Node):
             palm_ok = facing_score >= self.min_palm_facing_score
             now = time.time()
 
+            hand_dx = 0.0
+            hand_dy = 0.0
+
+            if palm_x is not None and palm_y is not None and self.active and in_zone:
+                hand_dx = (palm_x - 0.5) / max(self.zone_x_max - 0.5, 1e-6)
+                hand_dy = (palm_y - 0.5) / max(self.zone_y_max - 0.5, 1e-6)
+
+                hand_dx = clamp(hand_dx, -1.0, 1.0)
+                hand_dy = clamp(hand_dy, -1.0, 1.0)
+
+                if abs(hand_dx) < self.xy_publish_deadzone:
+                    hand_dx = 0.0
+                if abs(hand_dy) < self.xy_publish_deadzone:
+                    hand_dy = 0.0
+            else:
+                hand_dx = 0.0
+                hand_dy = 0.0
+
+            xy_msg = Vector3()
+            xy_msg.x = float(hand_dx)
+            xy_msg.y = float(hand_dy)
+            xy_msg.z = 0.0
+            self.hand_xy_pub.publish(xy_msg)
+
             if two_up and palm_ok:
                 if not self.toggle_latched:
                     if not self.active:
@@ -389,6 +491,7 @@ class GesturePub(Node):
                                 self._last_candidate = "none"
                                 self._same_count = 0
                                 self.publish_with_cooldown("none")
+                                self.prev_fist_active = False                                
                                 self.get_logger().info("Gesture control DEACTIVATED")
                 else:
                     self.activation_dwell_ok(False)
@@ -399,6 +502,12 @@ class GesturePub(Node):
             if self.active:
                 gesture_candidate = self.classify_active_gesture(lm, in_zone)
                 stable_output = self.smooth_gesture(gesture_candidate)
+                if self.active and palm_x is not None and palm_y is not None:
+                    self.current_confidence = self.compute_gesture_confidence(
+                        lm, palm_x, palm_y, stable_output
+                    )
+                else:
+                    self.current_confidence = 0.0
             else:
                 stable_output = self.smooth_gesture("none")
 
@@ -406,7 +515,8 @@ class GesturePub(Node):
             stable_output = self.smooth_gesture("none")
             self.activation_dwell_ok(False)
             self.toggle_latched = False
-        
+            self.current_confidence = 0.0
+            self.prev_fist_active = False
 
         # Publish pinch topics
         if pinch is not None:
@@ -417,10 +527,13 @@ class GesturePub(Node):
             self.pinch_norm_pub.publish(Float32(data=1.0))
 
         # Publish gesture
-        if self.active:
-            self.publish_with_cooldown(stable_output)
+        if self.active and self.current_confidence >= self.gesture_conf_threshold:
+            gesture_to_publish = stable_output
         else:
-            self.publish_with_cooldown("none")
+            gesture_to_publish = "none"
+
+        self.publish_with_cooldown(gesture_to_publish)
+        self.publish_fist_events(gesture_to_publish)
 
         # --------------------------------------------------------
         # UI overlays
@@ -492,28 +605,6 @@ class GesturePub(Node):
 
         cv2.putText(
             frame,
-            f"In zone: {in_zone}",
-            (20, 130),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
-
-        cv2.putText(
-            frame,
-            f"Palm facing score: {facing_score:.2f}",
-            (20, 158),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.60,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
-
-        cv2.putText(
-            frame,
             "2 fingers in box = activate | 2 fingers anywhere = deactivate",
             (20, frame_h - 48),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -532,7 +623,36 @@ class GesturePub(Node):
             2,
             cv2.LINE_AA,
         )
+
+        if self.show_confidence:
+            if self.current_confidence >= self.gesture_conf_threshold:
+                conf_color = (0,255,0)   # green
+            elif self.current_confidence >= self.gesture_conf_threshold - 0.15:
+                conf_color = (0,255,255) # yellow
+            else:
+                conf_color = (0,0,255)   # red
+            cv2.putText(
+                frame,
+                f"Confidence: {int(100 * self.current_confidence)}%",
+                (20, 130),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.75,
+                conf_color,
+                2,
+                cv2.LINE_AA,
+    )
         
+        cv2.putText(
+            frame,
+            f"Fist state: {'ON' if self.prev_fist_active else 'OFF'}",
+            (20, 160),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.70,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
         # Publish image
         if self.publish_image:
             try:
@@ -553,6 +673,8 @@ class GesturePub(Node):
             if (cv2.waitKey(1) & 0xFF) == ord("q"):
                 self.get_logger().info("Quit key pressed, shutting down gesture_pub.")
                 rclpy.shutdown()
+
+
 
     def destroy_node(self):
         try:
