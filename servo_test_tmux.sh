@@ -63,10 +63,10 @@ source /opt/ros/humble/setup.bash
 source ~/gesture_ws/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-ros2 run gesture_control gesture_servo_bridge --ros-args \
+ros2 run gesture_control gesture_servo_bridge_place_control --ros-args \
   -p command_frame:=base_link \
-  -p max_vx:=1.0 \
-  -p max_vy:=1.0 \
+  -p max_vx:=1.3 \
+  -p max_vy:=1.3 \
   -p xy_deadzone:=0.08 \
   -p vz:=0.00 \
   -p publish_rate:=50.0 \
@@ -91,7 +91,21 @@ ros2 run gesture_control gesture_servo_bridge --ros-args \
   -p inner_radius_enabled:=true \
   -p inner_radius:=0.25 \
   -p inner_radius_center_x:=0.0 \
-  -p inner_radius_center_y:=0.0
+  -p inner_radius_center_y:=0.0 \
+  -p gripper_backend:=polyscope \
+  -p place_request_pin:=2 \
+  -p place_done_pin:=3 \
+  -p pick_success_pin:=4 \
+  -p place_z:=0.31 \
+  -p place_lift_z:=0.45 \
+  -p place_down_speed:=1.5 \
+  -p place_up_speed:=2.0 \
+  -p place_z_tol:=0.01 \
+  -p place_release_frames:=4 \
+  -p reorient_wz_max:=10.0 \
+  -p carry_yaw_tol_deg:=1.0 \
+  -p carry_yaw_deg:=90.0 \
+  -p home_wrist3_deg:=-119.2
 " C-m
 
 # ------------------------------------------------------------------

@@ -32,6 +32,7 @@ setup(
 		'moveit_cartesian_demo = gesture_control.moveit_cartesian_demo:main',
         'gesture_servo_bridge = gesture_control.gesture_servo_bridge:main',
         'gesture_servo_bridge_sim = gesture_control.gesture_servo_bridge_sim:main',
+        'gesture_servo_bridge_place_control = gesture_control.gesture_servo_bridge_place_control:main',
         ],
     },
 )
