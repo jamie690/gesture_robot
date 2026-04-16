@@ -104,8 +104,7 @@ ros2 run gesture_control gesture_servo_bridge_place_control --ros-args \
   -p place_release_frames:=4 \
   -p reorient_wz_max:=10.0 \
   -p carry_yaw_tol_deg:=1.0 \
-  -p carry_yaw_deg:=90.0 \
-  -p home_wrist3_deg:=-119.2
+  -p carry_yaw_deg:=-90.0
 " C-m
 
 # ------------------------------------------------------------------

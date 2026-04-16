@@ -17,8 +17,6 @@ from std_srvs.srv import Trigger
 
 import tf2_ros
 
-from std_msgs.msg import Float64MultiArray
-from sensor_msgs.msg import JointState
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -114,12 +112,9 @@ class GestureServoBridge(Node):
         # Reorient gripper params
         #-------------------------------------------------------------
         self.declare_parameter("enable_post_pick_reorient", True)
-        self.declare_parameter("carry_yaw_deg", 0.0)
-        self.declare_parameter("carry_yaw_tol_deg", 8.0)
-        self.declare_parameter("reorient_wz_max", 0.7)
-        self.declare_parameter("reorient_timeout_s", 2.0)
-        self.reorient_timeout_s = float(self.get_parameter("reorient_timeout_s").value)
-        self.reorient_start_time = None
+        self.declare_parameter("carry_yaw_deg", 90.0)
+        self.declare_parameter("carry_yaw_tol_deg", 1.0)
+        self.declare_parameter("reorient_wz_max", 2.0)
 
         # ------------------------------------------------------------
         # Read params
@@ -189,6 +184,7 @@ class GestureServoBridge(Node):
         self.carry_yaw_tol_deg = float(self.get_parameter("carry_yaw_tol_deg").value)
         self.reorient_wz_max = float(self.get_parameter("reorient_wz_max").value)
 
+
         # ------------------------------------------------------------
         # Internal state
         # ------------------------------------------------------------
@@ -222,6 +218,9 @@ class GestureServoBridge(Node):
 
         self.last_z_debug_time = self.get_clock().now()
 
+        self.pre_pick_yaw = 0.0
+        self.have_pre_pick_yaw = False
+
 
         # ------------------------------------------------------------
         # ROS I/O
@@ -233,19 +232,7 @@ class GestureServoBridge(Node):
         self.pub_markers = self.create_publisher(MarkerArray, "/rg2_markers", 10)
         self.pub_collision_object = self.create_publisher(CollisionObject, "/collision_object", 10)
 
-        self.pub_joint_cmd = self.create_publisher(
-            Float64MultiArray, "/forward_position_controller/commands", 10
-        )
-        self.sub_joint_states = self.create_subscription(
-            JointState, "/joint_states", self.on_joint_states, 10
-        )
 
-        self.latest_joint_positions = {}
-        self.home_wrist3_deg = 0.0
-        self.declare_parameter("home_wrist3_deg", 0.0)
-        self.home_wrist3_deg = float(self.get_parameter("home_wrist3_deg").value)
-        self.declare_parameter("wrist_reorient_tol_deg", 1.0)
-        self.wrist_reorient_tol_deg = float(self.get_parameter("wrist_reorient_tol_deg").value)
 
         if self.use_ur_io_handshake:
             self.sub_io = self.create_subscription(IOStates, self.io_states_topic, self.on_io_states, 10)
@@ -364,24 +351,14 @@ class GestureServoBridge(Node):
             self.status_text = "Waiting for Polyscope gripper release"
 
         elif self.state == "POST_PICK_REORIENT":
-            reached = self.command_wrist3_home()
-            if self.reorient_start_time is not None:
-                elapsed = (self.get_clock().now() - self.reorient_start_time).nanoseconds / 1e9
-            else:
-                elapsed = 0.0
-
+            wz, reached = self.step_reorient_yaw()
+            self.status_text = "Post-pick: rotating gripper back"
             if reached:
                 self.state = "COARSE_PLACE_GUIDE"
                 self.current_gesture = "fist"
                 self.place_release_count = 0
                 self.status_text = "Carry mode: hold fist to move, release to place"
                 self.get_logger().info("Post-pick reorient complete. Entered carry mode.")
-            elif elapsed > self.reorient_timeout_s:
-                self.get_logger().warn("Post-pick reorient timed out. Continuing anyway.")
-                self.state = "COARSE_PLACE_GUIDE"
-                self.current_gesture = "fist"
-                self.place_release_count = 0
-                self.status_text = "Carry mode: reorient timeout, continuing"
 
         if self.state in ["COARSE_PICK_GUIDE", "COARSE_PLACE_GUIDE"] and (vx != 0.0 or vy != 0.0):
             vx, vy = self.apply_workspace_guard(vx, vy)
@@ -421,6 +398,16 @@ class GestureServoBridge(Node):
             self.get_logger().warn("Pick start ignored: handshake still busy")
             return
 
+        if self.update_current_tcp_pose():
+            self.pre_pick_yaw = self.quat_to_yaw(
+                self.current_tcp_qx,
+                self.current_tcp_qy,
+                self.current_tcp_qz,
+                self.current_tcp_qw,
+            )
+            self.have_pre_pick_yaw = True
+        else:
+            self.have_pre_pick_yaw = False
 
         self.state = "WAITING_FOR_CYCLE"
         self.status_text = "Pick cycle requested"
@@ -472,7 +459,6 @@ class GestureServoBridge(Node):
 
     def complete_pick_sequence(self) -> None:
         self.set_digital_output(self.pick_request_pin, False, label="pick_request")
-        self.reorient_start_time = self.get_clock().now()
 
         if not self.enable_place_control:
             self.state = "COARSE_PICK_GUIDE"
@@ -599,82 +585,30 @@ class GestureServoBridge(Node):
             self.current_tcp_qw,
         )
 
-        yaw_target = math.radians(self.carry_yaw_deg)
+        if self.have_pre_pick_yaw:
+            yaw_target = self.pre_pick_yaw
+        else:
+            yaw_target = math.radians(self.carry_yaw_deg)
+
         yaw_err = self.wrap_to_pi(yaw_target - yaw_now)
 
         tol = math.radians(self.carry_yaw_tol_deg)
         if abs(yaw_err) < tol:
             return 0.0, True
 
-        kp = 15.0
-        min_wz = 0.8
-
+        kp = 4.0
         raw_wz = kp * yaw_err
         wz = clamp(raw_wz, -self.reorient_wz_max, self.reorient_wz_max)
 
+        # keep it moving, but don't let it hunt too hard near the end
+        min_wz = 0.20
         if abs(wz) < min_wz:
             wz = math.copysign(min_wz, yaw_err)
 
-        # only soften very near target
-        if abs(yaw_err) < math.radians(1.5):
-            wz = clamp(wz, -0.25, 0.25)
+        if abs(yaw_err) < math.radians(2.0):
+            wz = clamp(wz, -0.20, 0.20)
 
         return wz, False
-
-    def on_joint_states(self, msg: JointState) -> None:
-        for name, pos in zip(msg.name, msg.position):
-            self.latest_joint_positions[name] = pos
-
-    def command_wrist3_home(self) -> bool:
-        joint_order = [
-            "shoulder_pan_joint",
-            "shoulder_lift_joint",
-            "elbow_joint",
-            "wrist_1_joint",
-            "wrist_2_joint",
-            "wrist_3_joint",
-        ]
-
-        if not all(n in self.latest_joint_positions for n in joint_order):
-            self.status_text = "Post-pick: waiting for joint_states"
-            return False
-
-        target = [self.latest_joint_positions[n] for n in joint_order]
-
-        current = self.latest_joint_positions["wrist_3_joint"]
-        home = math.radians(self.home_wrist3_deg)
-
-        best = self.nearest_equivalent_angle(home, current)
-        max_step = 0.35  # rad
-        delta = best - current
-        if abs(delta) > max_step:
-            best = current + math.copysign(max_step, delta)
-
-        msg = Float64MultiArray()
-        target[5] = best
-        msg.data = target
-        self.pub_joint_cmd.publish(msg)
-
-        err = abs(best - current)
-
-        self.get_logger().info(
-            f"wrist_3 current={current:.3f} rad "
-            f"home={home:.3f} rad "
-            f"best={best:.3f} rad "
-            f"err={err:.3f} rad"
-        )
-
-        return err < math.radians(self.wrist_reorient_tol_deg)
-    
-    def nearest_equivalent_angle(self, target_angle: float, current_angle: float) -> float:
-        candidates = [
-            target_angle - 4.0 * math.pi,
-            target_angle - 2.0 * math.pi,
-            target_angle,
-            target_angle + 2.0 * math.pi,
-            target_angle + 4.0 * math.pi,
-        ]
-        return min(candidates, key=lambda a: abs(a - current_angle))
 
     # ------------------------------------------------------------
     # I/O helpers
