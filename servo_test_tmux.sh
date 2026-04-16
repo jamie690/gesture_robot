@@ -89,7 +89,7 @@ ros2 run gesture_control gesture_servo_bridge_place_control --ros-args \
   -p y_min:=-0.6 \
   -p y_max:=0.6 \
   -p inner_radius_enabled:=true \
-  -p inner_radius:=0.25 \
+  -p inner_radius:=0.22 \
   -p inner_radius_center_x:=0.0 \
   -p inner_radius_center_y:=0.0 \
   -p gripper_backend:=polyscope \
@@ -98,13 +98,17 @@ ros2 run gesture_control gesture_servo_bridge_place_control --ros-args \
   -p pick_success_pin:=4 \
   -p place_z:=0.31 \
   -p place_lift_z:=0.45 \
-  -p place_down_speed:=1.5 \
-  -p place_up_speed:=2.0 \
+  -p place_down_speed:=2.0 \
+  -p place_up_speed:=3.0 \
   -p place_z_tol:=0.01 \
   -p place_release_frames:=4 \
   -p reorient_wz_max:=10.0 \
   -p carry_yaw_tol_deg:=1.0 \
-  -p carry_yaw_deg:=-90.0
+  -p carry_yaw_deg:=-90.0 \
+  -p align_down_enabled:=true \
+  -p tilt_tol_deg:=0.5 \
+  -p tilt_kp:=6.0 \
+  -p tilt_w_max:=1.5
 " C-m
 
 # ------------------------------------------------------------------

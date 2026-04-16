@@ -116,6 +116,11 @@ class GestureServoBridge(Node):
         self.declare_parameter("carry_yaw_tol_deg", 1.0)
         self.declare_parameter("reorient_wz_max", 2.0)
 
+        self.declare_parameter("align_down_enabled", True)
+        self.declare_parameter("tilt_tol_deg", 3.0)
+        self.declare_parameter("tilt_kp", 3.0)
+        self.declare_parameter("tilt_w_max", 0.8)
+
         # ------------------------------------------------------------
         # Read params
         # ------------------------------------------------------------
@@ -183,6 +188,11 @@ class GestureServoBridge(Node):
         self.carry_yaw_deg = float(self.get_parameter("carry_yaw_deg").value)
         self.carry_yaw_tol_deg = float(self.get_parameter("carry_yaw_tol_deg").value)
         self.reorient_wz_max = float(self.get_parameter("reorient_wz_max").value)
+
+        self.align_down_enabled = bool(self.get_parameter("align_down_enabled").value)
+        self.tilt_tol_deg = float(self.get_parameter("tilt_tol_deg").value)
+        self.tilt_kp = float(self.get_parameter("tilt_kp").value)
+        self.tilt_w_max = float(self.get_parameter("tilt_w_max").value)
 
 
         # ------------------------------------------------------------
@@ -351,9 +361,19 @@ class GestureServoBridge(Node):
             self.status_text = "Waiting for Polyscope gripper release"
 
         elif self.state == "POST_PICK_REORIENT":
-            wz, reached = self.step_reorient_yaw()
-            self.status_text = "Post-pick: rotating gripper back"
-            if reached:
+            wz, yaw_ok = self.step_reorient_yaw()
+
+            if self.align_down_enabled:
+                wx, wy, tilt_ok = self.step_align_down()
+            else:
+                wx, wy, tilt_ok = 0.0, 0.0, True
+
+            self.status_text = (
+                f"Post-pick: reorient yaw={'ok' if yaw_ok else '...'} "
+                f"tilt={'ok' if tilt_ok else '...'}"
+            )
+
+            if yaw_ok and tilt_ok:
                 self.state = "COARSE_PLACE_GUIDE"
                 self.current_gesture = "fist"
                 self.place_release_count = 0
@@ -540,8 +560,8 @@ class GestureServoBridge(Node):
         if abs(ez) < self.place_z_tol:
             return 0.0, True
 
-        kz = 4.0
-        min_speed = 0.20
+        kz = 7.0
+        min_speed = 1.0
 
         raw_vz = kz * ez
         vz = clamp(raw_vz, -max_speed, max_speed)
@@ -550,7 +570,7 @@ class GestureServoBridge(Node):
             vz = math.copysign(min_speed, ez)
 
         if abs(ez) < 0.01:
-            vz = clamp(vz, -0.25, 0.25)
+            vz = clamp(vz, -1.0, 1.0)
 
         return vz, False
     
@@ -596,19 +616,66 @@ class GestureServoBridge(Node):
         if abs(yaw_err) < tol:
             return 0.0, True
 
-        kp = 4.0
+        kp = 7.5
         raw_wz = kp * yaw_err
         wz = clamp(raw_wz, -self.reorient_wz_max, self.reorient_wz_max)
 
         # keep it moving, but don't let it hunt too hard near the end
-        min_wz = 0.20
+        min_wz = 3.0
         if abs(wz) < min_wz:
             wz = math.copysign(min_wz, yaw_err)
 
         if abs(yaw_err) < math.radians(2.0):
-            wz = clamp(wz, -0.20, 0.20)
+            wz = clamp(wz, -1.0, 1.0)
 
         return wz, False
+    
+    def quat_to_rotmat(self, x: float, y: float, z: float, w: float):
+        xx, yy, zz = x * x, y * y, z * z
+        xy, xz, yz = x * y, x * z, y * z
+        wx, wy, wz = w * x, w * y, w * z
+
+        return [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz),       2.0 * (xz + wy)],
+            [2.0 * (xy + wz),       1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy),       2.0 * (yz + wx),       1.0 - 2.0 * (xx + yy)],
+        ]
+
+
+    def step_align_down(self):
+        if not self.update_current_tcp_pose():
+            return 0.0, 0.0, False
+
+        R = self.quat_to_rotmat(
+            self.current_tcp_qx,
+            self.current_tcp_qy,
+            self.current_tcp_qz,
+            self.current_tcp_qw,
+        )
+
+        # tool Z axis expressed in base/world frame
+        ax = R[0][2]
+        ay = R[1][2]
+        az = R[2][2]
+
+        # desired "point straight down"
+        dx, dy, dz = 0.0, 0.0, -1.0
+
+        # correction axis = current × desired
+        ex = ay * dz - az * dy
+        ey = az * dx - ax * dz
+        ez = ax * dy - ay * dx
+
+        tilt_mag = math.sqrt(ex * ex + ey * ey + ez * ez)
+
+        if tilt_mag < math.sin(math.radians(self.tilt_tol_deg)):
+            return 0.0, 0.0, True
+
+        wx = clamp(self.tilt_kp * ex, -self.tilt_w_max, self.tilt_w_max)
+        wy = clamp(self.tilt_kp * ey, -self.tilt_w_max, self.tilt_w_max)
+
+
+        return wx, wy, False
 
     # ------------------------------------------------------------
     # I/O helpers
