@@ -1,5 +1,7 @@
 # Gesture-Guided UR10e Pick-and-Place System
 
+***See controlled-place git branch for full system files main branch has not been updated***
+
 This repository contains a ROS2 Humble gesture-control system for a UR10e collaborative robot. The system combines webcam-based hand gesture input, ROS2 supervisory control, MoveIt Servo motion control, and a PolyScope/OnRobot Eyes routine for autonomous vision-guided picking.
 
 The project is a hybrid shared-control system rather than full gesture teleoperation. The operator provides task intent and coarse planar guidance, while the robot-side vision routine handles precision-critical object localisation, gripper alignment and grasp execution.
