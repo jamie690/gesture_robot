@@ -1,27 +1,183 @@
-Gesture-controlled UR5e demo (ROS2 humble)
+# Gesture-Guided UR10e Pick-and-Place System
 
-Nodes:
-- gesture_pub.py
-  publishes:
-  	/gesture (String): open, fist
-  	/pinch_norm (Float32): 0..1 pinch amount
-  	
-  	
-- moveit_cartesian_demo.py
-  subscribes:
-  	/gesture
-  	/pinch_norm
-  uses:
-  	moveit /compute_ik
-  publishes:
-  	/joint_states_gesture
-  	/rg2_markers
-  	
-Architecture:
- gesture → intent → IK → joint_states → robot_state_publisher → TF → RViz
- 
-Important:
-- Do NOT run joint_state_publisher_gui
-- robot_state_publisher must be remapped to /joint_states_gesture
-- IK link: tool0
+This repository contains a ROS2 Humble gesture-control system for a UR10e collaborative robot. The system combines webcam-based hand gesture input, ROS2 supervisory control, MoveIt Servo motion control, and a PolyScope/OnRobot Eyes routine for autonomous vision-guided picking.
 
+The project is a hybrid shared-control system rather than full gesture teleoperation. The operator provides task intent and coarse planar guidance, while the robot-side vision routine handles precision-critical object localisation, gripper alignment and grasp execution.
+
+## System Overview
+
+```text
+webcam
+  -> gesture_pub.py
+  -> gesture_servo_bridge_place_control.py
+  -> MoveIt Servo
+  -> UR ROS2 driver
+  -> UR10e
+
+ROS2 <-> digital I/O handshake <-> PolyScope / OnRobot Eyes / RG6 gripper
+```
+
+Main system layers:
+
+* **Gesture input:** webcam + MediaPipe Hands detect hand landmarks and infer gestures.
+* **ROS2 supervision:** custom Python nodes interpret gestures, command motion, enforce workspace limits and manage task state.
+* **Robot motion:** MoveIt Servo and the UR ROS2 driver execute Cartesian velocity commands.
+* **Vision-assisted picking:** PolyScope runs the OnRobot Eyes locate-and-pick routine and RG6 gripper actions.
+
+## Main Nodes
+
+### `gesture_pub.py`
+
+Captures webcam frames, runs MediaPipe Hands, applies rule-based gesture classification and publishes gesture commands.
+
+Publishes:
+
+* `/gesture` (`std_msgs/String`) — stable gesture state, typically `open`, `fist` or `none`
+* `/hand_xy` (`geometry_msgs/Vector3`) — normalised hand position for coarse XY robot motion
+* `/fist_pressed` (`std_msgs/Bool`) — fresh fist event for pick triggering
+* `/fist_released` (`std_msgs/Bool`) — release event used by some place-control logic
+* `/gesture_camera/image_raw` (`sensor_msgs/Image`) — annotated webcam feed for feedback/debugging
+
+Key functions:
+
+* two-finger activation/deactivation
+* open-hand planar guidance
+* fist pick/carry command
+* hand-loss stop/deactivation behaviour
+* gesture filtering and stability logic
+
+### `gesture_servo_bridge_place_control.py`
+
+Main supervisory bridge between gesture input, MoveIt Servo, the UR10e and PolyScope.
+
+Subscribes to:
+
+* `/gesture`
+* `/hand_xy`
+* `/fist_pressed`
+* `/io_and_status_controller/io_states`
+* `/io_and_status_controller/robot_program_running`
+
+Publishes:
+
+* `/servo_node/delta_twist_cmds` (`geometry_msgs/TwistStamped`) — Cartesian velocity commands for MoveIt Servo
+* RViz marker topics for workspace/object/debug visualisation
+
+Uses services:
+
+* `/io_and_status_controller/set_io`
+* `/io_and_status_controller/hand_back_control`
+
+Key functions:
+
+* maps hand position to planar XY robot motion
+* enforces workspace limits and inner base exclusion zone
+* manages the pick/place state machine
+* coordinates ROS2–PolyScope handover using digital I/O
+* detects pick success/failure
+* handles post-pick reorientation, place descent and place lift
+
+### `moveit_cartesian_demo.py`
+
+Legacy/development node used for earlier RViz/IK testing.
+
+This node used `/gesture` and `/pinch_norm`, called MoveIt `/compute_ik`, and published `/joint_states_gesture` and marker feedback. It is **not** the final integrated robot-control workflow.
+
+## Gesture Interaction Model
+
+| Gesture      | Function                            |
+| ------------ | ----------------------------------- |
+| Two fingers  | Activate/deactivate gesture control |
+| Open hand    | Coarse planar robot guidance        |
+| Fist         | Trigger pick / carry object         |
+| Fist release | Trigger placement                   |
+| No hand      | Stop/deactivate for safety          |
+
+Typical workflow:
+
+1. Activate gesture control with two fingers in the central region.
+2. Use an open hand to guide the robot near a block.
+3. Close the hand into a fist to request a pick.
+4. PolyScope runs the OnRobot Eyes locate-and-pick routine.
+5. If the pick succeeds, ROS2 enters carry mode.
+6. Keep the fist closed to guide the grasped object.
+7. Release the fist to trigger placement.
+8. ROS2 lowers the object, PolyScope opens the RG6 gripper, then ROS2 lifts back up.
+
+## ROS2–PolyScope Digital I/O
+
+Pick handshake:
+
+| Signal | Direction         | Purpose             |
+| ------ | ----------------- | ------------------- |
+| DO0    | ROS2 -> PolyScope | Pick request        |
+| DO1    | PolyScope -> ROS2 | Pick cycle complete |
+| DO4    | PolyScope -> ROS2 | Pick success        |
+
+Place handshake:
+
+| Signal | Direction         | Purpose                |
+| ------ | ----------------- | ---------------------- |
+| DO2    | ROS2 -> PolyScope | Place/release request  |
+| DO3    | PolyScope -> ROS2 | Place/release complete |
+
+This digital I/O handover allows ROS2 to supervise the task while PolyScope handles the closed OnRobot Eyes and RG6 routines.
+
+## Launching
+
+The final system is launched using the tmux script:
+
+```bash
+./servo_test_tmux.sh
+```
+
+The launch stack starts:
+
+1. UR ROS2 driver
+2. MoveIt + MoveIt Servo
+3. `gesture_servo_bridge_place_control.py`
+4. `gesture_pub.py`
+5. RViz
+
+The script sets:
+
+```bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+```
+
+This was required for reliable ROS2 communication in the project setup.
+
+## Important Notes
+
+* The final robot platform was the **UR10e**.
+* MoveIt Servo must be running before gesture motion commands are sent.
+* The UR External Control program must be running on the robot.
+* The PolyScope program must contain the digital I/O pick/place handover logic.
+* OnRobot Eyes and RG6 control are handled inside PolyScope, not directly from ROS2.
+* The OnRobot Eyes routine must be configured to detect the target blocks.
+* If the hand is lost from view, robot motion stops as a conservative safety response.
+* Workspace limits and the inner exclusion zone should be checked before hardware testing.
+* Do not use `joint_state_publisher_gui` for the final robot-control setup.
+
+## Hardware and Software
+
+Main hardware:
+
+* Universal Robots UR10e collaborative robot
+* OnRobot Eyes eye-in-hand vision system
+* OnRobot RG6 gripper
+* Standard RGB webcam
+* Control laptop running Ubuntu 22.04 and ROS2 Humble
+
+Main software:
+
+* Ubuntu 22.04
+* ROS2 Humble
+* MoveIt Servo
+* UR ROS2 driver
+* OpenCV
+* MediaPipe Hands
+* RViz
+* tmux
+* PolyScope
+* OnRobot URCap
