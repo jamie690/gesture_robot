@@ -8,7 +8,6 @@ The project is a hybrid shared-control system rather than full gesture teleopera
 
 ## System Overview
 
-```text
 webcam
   -> gesture_pub.py
   -> gesture_servo_bridge_place_control.py
@@ -17,7 +16,6 @@ webcam
   -> UR10e
 
 ROS2 <-> digital I/O handshake <-> PolyScope / OnRobot Eyes / RG6 gripper
-```
 
 Main system layers:
 
